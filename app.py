@@ -1,5 +1,7 @@
 import io
+import json
 import math
+import os
 import re
 from datetime import datetime, date
 
@@ -13,10 +15,14 @@ try:
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import mm
+    from reportlab.graphics.shapes import Drawing, Line, Circle, String, Rect
 except Exception:
     A4 = None
 
 st.set_page_config(page_title="Carta de Inspeção CPK", layout="wide", page_icon="📊")
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODELOS_FILE = os.path.join(BASE_DIR, "modelos_cartas_cpk.json")
 
 st.markdown(
     """
@@ -29,6 +35,10 @@ st.markdown(
     .wn {border-left:5px solid #ffb340; padding:10px; background:#1d1810; border-radius:10px; margin-bottom:8px;}
     .fl {border-left:5px solid #ff4d4d; padding:10px; background:#1d1111; border-radius:10px; margin-bottom:8px;}
     .muted {color:#9a9aad; font-size:0.9rem;}
+    .orange-help {border-left:5px solid #ff8c00; padding:10px; background:#20160a; border-radius:10px; margin-bottom:8px;}
+    div.stButton > button[kind="primary"] {background:#00a86b !important; border-color:#00a86b !important; color:white !important;}
+    div.stFormSubmitButton > button {background:#ff8c00 !important; border-color:#ff8c00 !important; color:white !important; font-weight:700;}
+    div.stDownloadButton > button {background:#00a86b !important; border-color:#00a86b !important; color:white !important; font-weight:700;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -38,23 +48,99 @@ VERSION = f"RM_{datetime.now().strftime('%d_%m_%Y_%H%M')}"
 st.markdown(f"<div class='version'>{VERSION}</div>", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Estado
+# Persistência dos modelos
 # ─────────────────────────────────────────────────────────────────────────────
-if "carta_ok" not in st.session_state:
-    st.session_state.carta_ok = False
-if "caracteristicas" not in st.session_state:
-    st.session_state.caracteristicas = []
-if "selected_id" not in st.session_state:
-    st.session_state.selected_id = None
-if "carta_dados" not in st.session_state:
-    st.session_state.carta_dados = {}
+def load_modelos():
+    if not os.path.exists(MODELOS_FILE):
+        return {}
+    try:
+        with open(MODELOS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_modelos(modelos):
+    with open(MODELOS_FILE, "w", encoding="utf-8") as f:
+        json.dump(modelos, f, ensure_ascii=False, indent=2)
+
+
+def modelo_from_state(nome):
+    return {
+        "nome": nome,
+        "criado_em": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        "carta_base": {
+            "linha": st.session_state.carta_dados.get("linha", ""),
+            "embalagem": st.session_state.carta_dados.get("embalagem", ""),
+            "esp_corpo": st.session_state.carta_dados.get("esp_corpo", ""),
+            "esp_domo": st.session_state.carta_dados.get("esp_domo", ""),
+            "esp_fundo": st.session_state.carta_dados.get("esp_fundo", ""),
+        },
+        "caracteristicas": [
+            {
+                "descricao": c["descricao"],
+                "lie": c["lie"],
+                "lse": c["lse"],
+                "num_amostras": c["num_amostras"],
+            }
+            for c in st.session_state.caracteristicas
+        ],
+    }
+
+
+def aplicar_modelo(modelo):
+    base = modelo.get("carta_base", {})
+    st.session_state.carta_dados = {
+        **st.session_state.get("carta_dados", {}),
+        "linha": base.get("linha", ""),
+        "embalagem": base.get("embalagem", ""),
+        "esp_corpo": base.get("esp_corpo", ""),
+        "esp_domo": base.get("esp_domo", ""),
+        "esp_fundo": base.get("esp_fundo", ""),
+    }
+    chars = []
+    for idx, c in enumerate(modelo.get("caracteristicas", []), start=1):
+        n = int(c.get("num_amostras", 1) or 1)
+        chars.append({
+            "id": f"C{idx:03d}_{datetime.now().strftime('%H%M%S')}",
+            "descricao": c.get("descricao", ""),
+            "lie": float(c.get("lie")),
+            "lse": float(c.get("lse")),
+            "num_amostras": n,
+            "medicoes": [{"Amostra": i, "Medida 1": None, "Medida 2": None, "Medida 3": None} for i in range(1, n + 1)],
+        })
+    st.session_state.caracteristicas = chars
+    st.session_state.selected_id = chars[0]["id"] if chars else None
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Funções de cálculo
+# Estado
+# ─────────────────────────────────────────────────────────────────────────────
+def init_state():
+    defaults = {
+        "carta_ok": False,
+        "caracteristicas": [],
+        "selected_id": None,
+        "carta_dados": {},
+        "modelos": load_modelos(),
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+init_state()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cálculo estatístico
 # ─────────────────────────────────────────────────────────────────────────────
 def parse_float(value):
     if value is None or value == "":
         return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
     try:
         return float(str(value).replace(",", "."))
     except Exception:
@@ -96,16 +182,6 @@ def classify_cpk(cpk):
     return "Incapaz"
 
 
-def status_level(cpk):
-    if cpk is None:
-        return "wn"
-    if cpk >= 1.33:
-        return "ok"
-    if cpk >= 1.00:
-        return "wn"
-    return "fl"
-
-
 def flatten_measurements(char):
     vals = []
     for row in char.get("medicoes", []):
@@ -114,6 +190,14 @@ def flatten_measurements(char):
             if v is not None:
                 vals.append(v)
     return vals
+
+
+def amostras_completas(char):
+    completas = 0
+    for row in char.get("medicoes", []):
+        if all(parse_float(row.get(k)) is not None for k in ["Medida 1", "Medida 2", "Medida 3"]):
+            completas += 1
+    return completas
 
 
 def calc_characteristic(char):
@@ -125,6 +209,7 @@ def calc_characteristic(char):
         "lie": char.get("lie"),
         "lse": char.get("lse"),
         "amostras_previstas": char.get("num_amostras", 0),
+        "amostras_completas": amostras_completas(char),
         "medidas_previstas": char.get("num_amostras", 0) * 3,
         "medidas_realizadas": len(vals),
         "valores": vals,
@@ -143,24 +228,28 @@ def calc_characteristic(char):
 def build_insights(results):
     valid = [r for r in results if r.get("cpk") is not None]
     if not valid:
-        return [{"level":"wn", "text":"Ainda não há medições suficientes para análise. São necessárias no mínimo 2 medições válidas por característica e pelo menos um limite de especificação."}]
+        return [{"level":"wn", "text":"Ainda não há medições suficientes para análise. Cada característica deve ter medições válidas e limites de especificação informados."}]
     fail = [r for r in valid if r["cpk"] < 1]
     warn = [r for r in valid if 1 <= r["cpk"] < 1.33]
     ok = [r for r in valid if r["cpk"] >= 1.33]
     insights = []
     if fail:
         names = ", ".join(f"{r['descricao']} (Cpk {r['cpk']:.2f})" for r in fail)
-        insights.append({"level":"fl", "text":f"Parecer: processo não capaz para {len(fail)} característica(s): {names}. Recomendo bloqueio técnico da liberação até avaliação do setup, segregação do lote e nova coleta após correção."})
+        insights.append({"level":"fl", "text":f"Parecer: processo não capaz para {len(fail)} característica(s): {names}. Minha recomendação é não liberar o lote sem avaliação técnica, revisar setup, segregar material suspeito e repetir a coleta após correção."})
     if warn:
         names = ", ".join(f"{r['descricao']} (Cpk {r['cpk']:.2f})" for r in warn)
-        insights.append({"level":"wn", "text":f"Parecer: processo marginal para {len(warn)} característica(s): {names}. Recomendo acompanhamento reforçado, ajuste preventivo e aumento temporário da frequência de inspeção."})
+        insights.append({"level":"wn", "text":f"Parecer: processo marginal para {len(warn)} característica(s): {names}. Eu manteria o processo em acompanhamento reforçado, com ajuste preventivo e aumento temporário da frequência de inspeção."})
     if ok and not fail and not warn:
         insights.append({"level":"ok", "text":f"Parecer: processo capaz. Todas as {len(ok)} característica(s) avaliadas apresentam Cpk ≥ 1,33, indicando boa condição estatística frente aos limites especificados."})
     for r in valid:
         cp, cpk = r.get("cp"), r.get("cpk")
         if cp and cpk and cp > 0 and (cp - cpk) / cp > 0.15:
             perda = round((cp - cpk) / cp * 100)
-            insights.append({"level":"wn", "text":f"Foi identificado descentramento em {r['descricao']}: Cp={cp:.2f} e Cpk={cpk:.2f}, com perda aproximada de {perda}% da capacidade potencial. O processo tem variação aceitável, mas está deslocado em relação ao centro da especificação."})
+            insights.append({"level":"wn", "text":f"Descentramento identificado em {r['descricao']}: Cp={cp:.2f} e Cpk={cpk:.2f}, com perda aproximada de {perda}% da capacidade potencial. A variação pode estar aceitável, mas o processo está deslocado em relação ao centro da especificação."})
+    incompletas = [r for r in results if r["amostras_completas"] < r["amostras_previstas"]]
+    if incompletas:
+        names = ", ".join(f"{r['descricao']} ({r['amostras_completas']}/{r['amostras_previstas']} amostras)" for r in incompletas)
+        insights.append({"level":"wn", "text":f"Atenção: existem coletas incompletas em {names}. O parecer estatístico é parcial até completar as 3 medidas de todas as amostras previstas."})
     pct_ok = round(len(ok) / len(valid) * 100)
     level = "ok" if pct_ok >= 80 and not fail else "wn" if pct_ok >= 50 else "fl"
     insights.append({"level":level, "text":f"Resumo geral: {pct_ok}% das características calculadas estão capazes. Total analisado: {len(valid)} característica(s)."})
@@ -196,6 +285,55 @@ def control_chart(result):
     return fig
 
 
+def pdf_chart_drawing(result, W):
+    vals = result.get("valores", [])
+    if len(vals) < 2:
+        return None
+    mean = sum(vals) / len(vals)
+    std = math.sqrt(sum((v - mean) ** 2 for v in vals) / (len(vals) - 1))
+    ucl = mean + 3 * std
+    lcl = mean - 3 * std
+    lse = result.get("lse")
+    lie = result.get("lie")
+    all_v = vals + [mean, ucl, lcl] + ([lse] if lse is not None else []) + ([lie] if lie is not None else [])
+    vmn, vmx = min(all_v), max(all_v)
+    vr = vmx - vmn or 0.001
+    DW, DH = W, 42 * mm
+    PAD_L, PAD_R, PAD_T, PAD_B = 13 * mm, 21 * mm, 5 * mm, 7 * mm
+    CW, CH = DW - PAD_L - PAD_R, DH - PAD_T - PAD_B
+
+    def xp(i):
+        return PAD_L + (i / (len(vals) - 1 or 1)) * CW
+
+    def yp(v):
+        return PAD_B + ((v - vmn) / vr) * CH
+
+    d = Drawing(DW, DH)
+    d.add(Rect(0, 0, DW, DH, fillColor=colors.whitesmoke, strokeColor=colors.lightgrey, strokeWidth=0.5))
+
+    def hline(val, col, label):
+        y = yp(val)
+        d.add(Line(PAD_L, y, PAD_L + CW, y, strokeColor=col, strokeWidth=0.6))
+        d.add(String(PAD_L + CW + 2, y - 2, f"{label} {val:.3f}", fontSize=5.5, fillColor=col))
+
+    hline(mean, colors.HexColor("#3366cc"), "M")
+    hline(ucl, colors.HexColor("#cc3333"), "LSC")
+    hline(lcl, colors.HexColor("#cc3333"), "LIC")
+    if lse is not None:
+        hline(lse, colors.HexColor("#cc8800"), "LSE")
+    if lie is not None:
+        hline(lie, colors.HexColor("#cc8800"), "LIE")
+
+    for i in range(len(vals) - 1):
+        d.add(Line(xp(i), yp(vals[i]), xp(i + 1), yp(vals[i + 1]), strokeColor=colors.HexColor("#111111"), strokeWidth=0.9))
+    for i, v in enumerate(vals):
+        out = (lse is not None and v > lse) or (lie is not None and v < lie)
+        col = colors.red if out else colors.HexColor("#00a86b")
+        d.add(Circle(xp(i), yp(v), 1.7, fillColor=col, strokeColor=col))
+    d.add(String(PAD_L, DH - 11, f"{result['descricao']} | Cpk: {result['cpk'] if result['cpk'] is not None else '—'}", fontSize=7.5, fillColor=colors.black))
+    return d
+
+
 def make_pdf(carta, results):
     if A4 is None:
         return None
@@ -216,23 +354,34 @@ def make_pdf(carta, results):
         ["Esp. Corpo", carta.get("esp_corpo", ""), "Esp. Domo", carta.get("esp_domo", "")],
         ["Esp. Fundo", carta.get("esp_fundo", ""), "Lote produzido", carta.get("lote_qtd", "")],
         ["OP", carta.get("op", ""), "Data", carta.get("data", "")],
+        ["Responsável", carta.get("responsavel_nome", ""), "Chapa", carta.get("responsavel_chapa", "")],
+        ["Material corpo", carta.get("corpo_mat", ""), "Material domo", carta.get("domo_mat", "")],
+        ["Material fundo", carta.get("fundo_mat", ""), "Observações", carta.get("obs", "")],
     ]
     t = Table(dados, colWidths=[W*.18, W*.32, W*.18, W*.32])
-    t.setStyle(TableStyle([("GRID", (0,0),(-1,-1), .25, colors.grey), ("FONTSIZE", (0,0),(-1,-1), 8), ("BACKGROUND", (0,0),(-1,-1), colors.whitesmoke)]))
+    t.setStyle(TableStyle([("GRID", (0,0),(-1,-1), .25, colors.grey), ("FONTSIZE", (0,0),(-1,-1), 7.5), ("BACKGROUND", (0,0),(-1,-1), colors.whitesmoke)]))
     story.append(t)
     story.append(Spacer(1, 4*mm))
-    rows = [["Característica", "N", "Média", "Desvio", "LIE", "LSE", "Cp", "CPU", "CPL", "Cpk", "Status"]]
+    rows = [["Característica", "Amostras", "N", "Média", "Desvio", "LIE", "LSE", "Cp", "CPU", "CPL", "Cpk", "Status"]]
     for r in results:
-        rows.append([r["descricao"], r["n"], r["media"], r["desvio"], r["lie"], r["lse"], r["cp"], r["cpu"], r["cpl"], r["cpk"], r["status"]])
-    tb = Table(rows, colWidths=[W*.24, W*.05, W*.08, W*.08, W*.08, W*.08, W*.07, W*.07, W*.07, W*.07, W*.11], repeatRows=1)
-    tb.setStyle(TableStyle([("GRID", (0,0),(-1,-1), .25, colors.grey), ("FONTSIZE", (0,0),(-1,-1), 6.5), ("BACKGROUND", (0,0),(-1,0), colors.lightgrey)]))
+        rows.append([r["descricao"], f"{r['amostras_completas']}/{r['amostras_previstas']}", r["n"], r["media"], r["desvio"], r["lie"], r["lse"], r["cp"], r["cpu"], r["cpl"], r["cpk"], r["status"]])
+    tb = Table(rows, colWidths=[W*.21, W*.075, W*.04, W*.075, W*.075, W*.07, W*.07, W*.055, W*.055, W*.055, W*.06, W*.10], repeatRows=1)
+    tb.setStyle(TableStyle([("GRID", (0,0),(-1,-1), .25, colors.grey), ("FONTSIZE", (0,0),(-1,-1), 6.2), ("BACKGROUND", (0,0),(-1,0), colors.lightgrey)]))
     story.append(tb)
-    story.append(Spacer(1, 4*mm))
-    story.append(Paragraph("<b>Análise e parecer automático</b>", S("sec", fontSize=10, textColor=TEXT, fontName="Helvetica-Bold")))
+    story.append(Spacer(1, 5*mm))
+    story.append(Paragraph("<b>Gráficos das coletas</b>", S("sec1", fontSize=10, textColor=TEXT, fontName="Helvetica-Bold")))
+    for r in results:
+        d = pdf_chart_drawing(r, W)
+        if d:
+            story.append(d)
+            story.append(Spacer(1, 3*mm))
+    story.append(Paragraph("<b>Análise e parecer automático</b>", S("sec2", fontSize=10, textColor=TEXT, fontName="Helvetica-Bold")))
     for ins in build_insights(results):
         story.append(Paragraph(ins["text"], S("body", fontSize=8, leading=11, textColor=TEXT)))
+        story.append(Spacer(1, 1.2*mm))
     story.append(Spacer(1, 8*mm))
-    story.append(Paragraph("Responsável técnico: _______________________________", S("sig", fontSize=8, textColor=TEXT)))
+    story.append(Paragraph(f"Responsável pela inspeção: {carta.get('responsavel_nome','')} | Chapa: {carta.get('responsavel_chapa','')}", S("resp", fontSize=8, textColor=TEXT)))
+    story.append(Paragraph("Assinatura: _______________________________", S("sig", fontSize=8, textColor=TEXT)))
     doc.build(story)
     buf.seek(0)
     return buf.getvalue()
@@ -241,12 +390,33 @@ def make_pdf(carta, results):
 # Interface
 # ─────────────────────────────────────────────────────────────────────────────
 st.title("📊 Carta de Inspeção CPK")
-st.caption("Fluxo: dados da carta → criação das características → registro das medições → análise estatística e parecer automático.")
+st.caption("Fluxo: modelo salvo → carta de dados → características → medições com 3 medidas por amostra → análise estatística e parecer automático.")
 
 tab1, tab2, tab3, tab4 = st.tabs(["1. Carta de dados", "2. Criar inspeção", "3. Registrar medições", "4. Análise estatística"])
 
 with tab1:
     st.subheader("Carta de dados — materiais e identificação")
+
+    modelos = st.session_state.modelos
+    if modelos:
+        st.markdown("#### Utilizar modelo salvo")
+        nomes_modelos = ["— Novo preenchimento sem modelo —"] + sorted(modelos.keys())
+        modelo_sel = st.selectbox("Modelo de carta", nomes_modelos)
+        c_load, c_del = st.columns(2)
+        if c_load.button("Carregar modelo selecionado", use_container_width=True, type="primary", disabled=(modelo_sel.startswith("—"))):
+            aplicar_modelo(modelos[modelo_sel])
+            st.session_state.carta_ok = False
+            st.success("Modelo carregado. Complete os dados variáveis da carta e salve para liberar a inspeção.")
+            st.rerun()
+        if c_del.button("Excluir modelo selecionado", use_container_width=True, disabled=(modelo_sel.startswith("—"))):
+            modelos.pop(modelo_sel, None)
+            save_modelos(modelos)
+            st.session_state.modelos = modelos
+            st.warning("Modelo excluído.")
+            st.rerun()
+    else:
+        st.markdown("<div class='orange-help'>Nenhum modelo salvo ainda. Após criar as características, salve o modelo para reutilizar nas próximas inspeções.</div>", unsafe_allow_html=True)
+
     with st.form("form_carta"):
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -260,6 +430,12 @@ with tab1:
         with c3:
             lote_qtd = st.number_input("Lote produzido (Qtd) *", min_value=0, step=1, value=int(st.session_state.carta_dados.get("lote_qtd", 0) or 0))
             data_carta = st.date_input("Data", value=date.today(), format="DD/MM/YYYY")
+        st.markdown("#### Responsável pela inspeção")
+        r1, r2 = st.columns(2)
+        with r1:
+            responsavel_nome = st.text_input("Nome do responsável pela inspeção *", value=st.session_state.carta_dados.get("responsavel_nome", ""))
+        with r2:
+            responsavel_chapa = st.text_input("Chapa do responsável pela inspeção *", value=st.session_state.carta_dados.get("responsavel_chapa", ""))
         st.markdown("#### Materiais")
         m1, m2, m3 = st.columns(3)
         with m1:
@@ -271,7 +447,7 @@ with tab1:
         obs = st.text_area("Observações gerais", value=st.session_state.carta_dados.get("obs", ""))
         submitted = st.form_submit_button("Salvar carta e liberar criação da inspeção", use_container_width=True)
     if submitted:
-        obrig = [linha, embalagem, op, esp_corpo, esp_domo, esp_fundo]
+        obrig = [linha, embalagem, op, esp_corpo, esp_domo, esp_fundo, responsavel_nome, responsavel_chapa]
         if any(str(v).strip() == "" for v in obrig) or lote_qtd <= 0:
             st.error("Preencha todos os campos obrigatórios marcados com * e informe lote produzido maior que zero.")
         else:
@@ -281,17 +457,19 @@ with tab1:
                 "esp_domo": esp_domo, "esp_fundo": esp_fundo, "lote_qtd": lote_qtd,
                 "data": data_carta.strftime("%d/%m/%Y"), "domo_mat": domo_mat,
                 "corpo_mat": corpo_mat, "fundo_mat": fundo_mat, "obs": obs,
+                "responsavel_nome": responsavel_nome.strip(), "responsavel_chapa": responsavel_chapa.strip(),
             }
             st.success("Carta salva. A aba 'Criar inspeção' está liberada.")
 
     if st.session_state.carta_ok:
-        st.markdown("<div class='card'><b>Carta ativa:</b> " + f"Linha {st.session_state.carta_dados.get('linha')} | Embalagem {st.session_state.carta_dados.get('embalagem')} | OP {st.session_state.carta_dados.get('op')}" + "</div>", unsafe_allow_html=True)
+        st.markdown("<div class='card'><b>Carta ativa:</b> " + f"Linha {st.session_state.carta_dados.get('linha')} | Embalagem {st.session_state.carta_dados.get('embalagem')} | OP {st.session_state.carta_dados.get('op')} | Responsável {st.session_state.carta_dados.get('responsavel_nome')} - Chapa {st.session_state.carta_dados.get('responsavel_chapa')}" + "</div>", unsafe_allow_html=True)
 
 with tab2:
     st.subheader("Criação das características de inspeção")
     if not st.session_state.carta_ok:
         st.warning("Primeiro salve a Carta de dados na aba 1.")
     else:
+        st.markdown("<div class='orange-help'>O botão de criação fica em laranja para indicar inclusão/edição. Após a característica estar criada e disponível para uso, os botões de abertura e exportação aparecem em verde.</div>", unsafe_allow_html=True)
         with st.form("form_caracteristica"):
             descricao = st.text_input("Descrição da característica *", placeholder="Ex.: Diâmetro interno, pestana, altura, profundidade de expansão")
             c1, c2, c3 = st.columns(3)
@@ -301,7 +479,7 @@ with tab2:
                 lse = st.text_input("Limite máximo / LSE *", placeholder="Ex.: 52,30")
             with c3:
                 num_amostras = st.number_input("Número de amostras que serão coletadas *", min_value=1, max_value=200, step=1, value=10)
-            submitted_char = st.form_submit_button("Criar característica", use_container_width=True)
+            submitted_char = st.form_submit_button("Salvar característica", use_container_width=True)
         if submitted_char:
             lie_v = parse_float(lie)
             lse_v = parse_float(lse)
@@ -315,7 +493,7 @@ with tab2:
                     "num_amostras": int(num_amostras), "medicoes": medicoes,
                 })
                 st.session_state.selected_id = new_id
-                st.success("Característica criada. Clique nela abaixo ou acesse a aba 'Registrar medições'.")
+                st.success("Característica criada e habilitada para utilização.")
 
         if st.session_state.caracteristicas:
             st.markdown("#### Características abertas")
@@ -325,14 +503,24 @@ with tab2:
                 cols[0].markdown(f"**{char['descricao']}**  \nLIE: {char['lie']} | LSE: {char['lse']} | Amostras: {char['num_amostras']} | Medições: {result['medidas_realizadas']}/{result['medidas_previstas']}")
                 cols[1].metric("Cpk", "—" if result["cpk"] is None else result["cpk"])
                 cols[2].markdown(f"**Status:** {result['status']}")
-                if cols[3].button("Abrir", key=f"open_{char['id']}"):
+                if cols[3].button("Abrir", key=f"open_{char['id']}", type="primary"):
                     st.session_state.selected_id = char["id"]
                     st.success(f"Característica selecionada: {char['descricao']}")
+
+            st.markdown("#### Salvar modelo da carta")
+            nome_modelo = st.text_input("Nome do modelo para reutilização", value=f"{st.session_state.carta_dados.get('linha','')}_{st.session_state.carta_dados.get('embalagem','')}".strip("_"))
+            if st.button("Salvar modelo com estas características", use_container_width=True, type="primary"):
+                if not nome_modelo.strip():
+                    st.error("Informe um nome para o modelo.")
+                else:
+                    st.session_state.modelos[nome_modelo.strip()] = modelo_from_state(nome_modelo.strip())
+                    save_modelos(st.session_state.modelos)
+                    st.success("Modelo salvo. Ele será carregado automaticamente como opção quando o aplicativo for reiniciado.")
 
 with tab3:
     st.subheader("Registro das medições")
     if not st.session_state.caracteristicas:
-        st.warning("Crie pelo menos uma característica na aba 2.")
+        st.warning("Crie pelo menos uma característica na aba 2 ou carregue um modelo salvo.")
     else:
         options = {f"{c['descricao']} | {c['id']}": c["id"] for c in st.session_state.caracteristicas}
         current_key = next((k for k, v in options.items() if v == st.session_state.selected_id), list(options.keys())[0])
@@ -354,9 +542,18 @@ with tab3:
             },
             key=f"editor_{char['id']}",
         )
-        if st.button("Salvar medições desta característica", use_container_width=True):
-            char["medicoes"] = edited_med.to_dict("records")
-            st.success("Medições salvas. A análise estatística já pode ser consultada na aba 4.")
+        if st.button("Salvar medições desta característica", use_container_width=True, type="primary"):
+            registros = edited_med.to_dict("records")
+            incompletas = []
+            for row in registros:
+                vals = [parse_float(row.get(k)) for k in ["Medida 1", "Medida 2", "Medida 3"]]
+                if any(v is not None for v in vals) and not all(v is not None for v in vals):
+                    incompletas.append(int(row.get("Amostra", 0)))
+            if incompletas:
+                st.error(f"As amostras {incompletas} estão parcialmente preenchidas. Cada amostra registrada deve ter as 3 medidas.")
+            else:
+                char["medicoes"] = registros
+                st.success("Medições salvas. A análise estatística já pode ser consultada na aba 4.")
 
 with tab4:
     st.subheader("Análise estatística e parecer do processo")
@@ -377,22 +574,22 @@ with tab4:
         c5.metric("Características", len(results))
 
         result_df = pd.DataFrame([{
-            "Característica": r["descricao"], "Amostras previstas": r["amostras_previstas"],
+            "Característica": r["descricao"], "Amostras completas": f"{r['amostras_completas']}/{r['amostras_previstas']}",
             "Medições realizadas": r["medidas_realizadas"], "N": r["n"], "Média": r["media"],
             "Desvio": r["desvio"], "LIE": r["lie"], "LSE": r["lse"], "Cp": r["cp"],
             "CPU": r["cpu"], "CPL": r["cpl"], "Cpk": r["cpk"], "Status": r["status"],
         } for r in results])
         st.dataframe(result_df, use_container_width=True, hide_index=True)
 
-        st.markdown("#### Parecer automático")
-        for ins in build_insights(results):
-            st.markdown(f"<div class='{ins['level']}'>{ins['text']}</div>", unsafe_allow_html=True)
-
-        st.markdown("#### Gráficos por característica")
+        st.markdown("#### Gráficos das coletas por característica")
         for r in results:
             fig = control_chart(r)
             if fig:
                 st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("#### Análise e parecer automático")
+        for ins in build_insights(results):
+            st.markdown(f"<div class='{ins['level']}'>{ins['text']}</div>", unsafe_allow_html=True)
 
         st.markdown("#### Exportação")
         col_a, col_b = st.columns(2)
