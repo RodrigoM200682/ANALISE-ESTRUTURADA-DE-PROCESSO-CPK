@@ -73,8 +73,11 @@ def modelo_from_state(nome):
         "carta_base": {
             "linha": st.session_state.carta_dados.get("linha", ""),
             "embalagem": st.session_state.carta_dados.get("embalagem", ""),
-            "esp_corpo": st.session_state.carta_dados.get("esp_corpo", ""),
+            "domo_mat": st.session_state.carta_dados.get("domo_mat", ""),
             "esp_domo": st.session_state.carta_dados.get("esp_domo", ""),
+            "corpo_mat": st.session_state.carta_dados.get("corpo_mat", ""),
+            "esp_corpo": st.session_state.carta_dados.get("esp_corpo", ""),
+            "fundo_mat": st.session_state.carta_dados.get("fundo_mat", ""),
             "esp_fundo": st.session_state.carta_dados.get("esp_fundo", ""),
         },
         "caracteristicas": [
@@ -95,8 +98,11 @@ def aplicar_modelo(modelo):
         **st.session_state.get("carta_dados", {}),
         "linha": base.get("linha", ""),
         "embalagem": base.get("embalagem", ""),
-        "esp_corpo": base.get("esp_corpo", ""),
+        "domo_mat": base.get("domo_mat", ""),
         "esp_domo": base.get("esp_domo", ""),
+        "corpo_mat": base.get("corpo_mat", ""),
+        "esp_corpo": base.get("esp_corpo", ""),
+        "fundo_mat": base.get("fundo_mat", ""),
         "esp_fundo": base.get("esp_fundo", ""),
     }
     chars = []
@@ -266,21 +272,33 @@ def control_chart(result):
     lcl = mean - 3 * std
     x = list(range(1, len(vals) + 1))
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x, y=vals, mode="lines+markers+text", text=[f"{v:.3f}" for v in vals], textposition="top center", name="Medições"))
-    fig.add_hline(y=mean, line_dash="solid", annotation_text=f"Média {mean:.3f}")
-    fig.add_hline(y=ucl, line_dash="dash", annotation_text=f"LSC {ucl:.3f}")
-    fig.add_hline(y=lcl, line_dash="dash", annotation_text=f"LIC {lcl:.3f}")
+    fig.add_trace(go.Scatter(
+        x=x,
+        y=vals,
+        mode="lines+markers",
+        name="Medições",
+        line=dict(width=2),
+        marker=dict(size=7),
+    ))
+    # A média aparece no título para não poluir o gráfico com mais uma linha.
+    fig.add_hline(y=ucl, line_dash="dash", line_color="#ff4d4d", line_width=3, annotation_text="LSC", annotation_font_color="#ff4d4d")
+    fig.add_hline(y=lcl, line_dash="dash", line_color="#ff4d4d", line_width=3, annotation_text="LIC", annotation_font_color="#ff4d4d")
     if result.get("lse") is not None:
-        fig.add_hline(y=result["lse"], line_dash="dot", annotation_text=f"LSE {result['lse']:.3f}")
+        fig.add_hline(y=result["lse"], line_dash="solid", line_color="#ff4d4d", line_width=4, annotation_text="LSE", annotation_font_color="#ff4d4d")
     if result.get("lie") is not None:
-        fig.add_hline(y=result["lie"], line_dash="dot", annotation_text=f"LIE {result['lie']:.3f}")
+        fig.add_hline(y=result["lie"], line_dash="solid", line_color="#ff4d4d", line_width=4, annotation_text="LIE", annotation_font_color="#ff4d4d")
+    media_txt = "—" if result.get("media") is None else f"{result['media']:.4f}"
+    cpk_txt = "—" if result.get("cpk") is None else f"{result['cpk']:.4f}"
     fig.update_layout(
         height=370,
-        title=f"{result['descricao']} | Cpk: {result['cpk'] if result['cpk'] is not None else '—'}",
+        title=f"{result['descricao']} | Cpk: {cpk_txt} | Média: {media_txt}",
         paper_bgcolor="#1c1c25",
         plot_bgcolor="#16161d",
         font=dict(color="#e8e8f0"),
         margin=dict(l=20, r=20, t=55, b=20),
+        xaxis_title="Sequência das medições",
+        yaxis_title="Valor medido",
+        showlegend=False,
     )
     return fig
 
@@ -295,11 +313,11 @@ def pdf_chart_drawing(result, W):
     lcl = mean - 3 * std
     lse = result.get("lse")
     lie = result.get("lie")
-    all_v = vals + [mean, ucl, lcl] + ([lse] if lse is not None else []) + ([lie] if lie is not None else [])
+    all_v = vals + [ucl, lcl] + ([lse] if lse is not None else []) + ([lie] if lie is not None else [])
     vmn, vmx = min(all_v), max(all_v)
     vr = vmx - vmn or 0.001
     DW, DH = W, 42 * mm
-    PAD_L, PAD_R, PAD_T, PAD_B = 13 * mm, 21 * mm, 5 * mm, 7 * mm
+    PAD_L, PAD_R, PAD_T, PAD_B = 13 * mm, 16 * mm, 5 * mm, 7 * mm
     CW, CH = DW - PAD_L - PAD_R, DH - PAD_T - PAD_B
 
     def xp(i):
@@ -311,18 +329,21 @@ def pdf_chart_drawing(result, W):
     d = Drawing(DW, DH)
     d.add(Rect(0, 0, DW, DH, fillColor=colors.whitesmoke, strokeColor=colors.lightgrey, strokeWidth=0.5))
 
-    def hline(val, col, label):
+    def hline(val, col, label, width=1.0, dash=None):
         y = yp(val)
-        d.add(Line(PAD_L, y, PAD_L + CW, y, strokeColor=col, strokeWidth=0.6))
-        d.add(String(PAD_L + CW + 2, y - 2, f"{label} {val:.3f}", fontSize=5.5, fillColor=col))
+        ln = Line(PAD_L, y, PAD_L + CW, y, strokeColor=col, strokeWidth=width)
+        if dash:
+            ln.strokeDashArray = dash
+        d.add(ln)
+        d.add(String(PAD_L + CW + 2, y - 2, label, fontSize=5.5, fillColor=col))
 
-    hline(mean, colors.HexColor("#3366cc"), "M")
-    hline(ucl, colors.HexColor("#cc3333"), "LSC")
-    hline(lcl, colors.HexColor("#cc3333"), "LIC")
+    red = colors.HexColor("#cc0000")
+    hline(ucl, red, "LSC", width=1.4, dash=[2, 2])
+    hline(lcl, red, "LIC", width=1.4, dash=[2, 2])
     if lse is not None:
-        hline(lse, colors.HexColor("#cc8800"), "LSE")
+        hline(lse, red, "LSE", width=2.2)
     if lie is not None:
-        hline(lie, colors.HexColor("#cc8800"), "LIE")
+        hline(lie, red, "LIE", width=2.2)
 
     for i in range(len(vals) - 1):
         d.add(Line(xp(i), yp(vals[i]), xp(i + 1), yp(vals[i + 1]), strokeColor=colors.HexColor("#111111"), strokeWidth=0.9))
@@ -330,7 +351,9 @@ def pdf_chart_drawing(result, W):
         out = (lse is not None and v > lse) or (lie is not None and v < lie)
         col = colors.red if out else colors.HexColor("#00a86b")
         d.add(Circle(xp(i), yp(v), 1.7, fillColor=col, strokeColor=col))
-    d.add(String(PAD_L, DH - 11, f"{result['descricao']} | Cpk: {result['cpk'] if result['cpk'] is not None else '—'}", fontSize=7.5, fillColor=colors.black))
+    cpk_txt = "—" if result.get("cpk") is None else f"{result['cpk']:.4f}"
+    media_txt = "—" if result.get("media") is None else f"{result['media']:.4f}"
+    d.add(String(PAD_L, DH - 11, f"{result['descricao']} | Cpk: {cpk_txt} | Média: {media_txt}", fontSize=7.5, fillColor=colors.black))
     return d
 
 
@@ -349,18 +372,33 @@ def make_pdf(carta, results):
     story.append(Paragraph("<b>Relatório de Carta de Inspeção e CPK</b>", S("title", fontSize=15, textColor=TEXT, fontName="Helvetica-Bold")))
     story.append(Paragraph(f"Gerado: {datetime.now().strftime('%d/%m/%Y %H:%M')}", S("sub", fontSize=8, textColor=MUTED)))
     story.append(Spacer(1, 4*mm))
-    dados = [
-        ["Linha", carta.get("linha", ""), "Embalagem", carta.get("embalagem", "")],
-        ["Esp. Corpo", carta.get("esp_corpo", ""), "Esp. Domo", carta.get("esp_domo", "")],
-        ["Esp. Fundo", carta.get("esp_fundo", ""), "Lote produzido", carta.get("lote_qtd", "")],
-        ["OP", carta.get("op", ""), "Data", carta.get("data", "")],
-        ["Responsável", carta.get("responsavel_nome", ""), "Chapa", carta.get("responsavel_chapa", "")],
-        ["Material corpo", carta.get("corpo_mat", ""), "Material domo", carta.get("domo_mat", "")],
-        ["Material fundo", carta.get("fundo_mat", ""), "Observações", carta.get("obs", "")],
+    story.append(Paragraph("<b>Dados dos materiais</b>", S("sec_mat", fontSize=9, textColor=TEXT, fontName="Helvetica-Bold")))
+    dados_materiais = [
+        ["Usina domo", carta.get("domo_mat", ""), "Espessura domo", carta.get("esp_domo", "")],
+        ["Usina corpo", carta.get("corpo_mat", ""), "Espessura corpo", carta.get("esp_corpo", "")],
+        ["Usina fundo", carta.get("fundo_mat", ""), "Espessura fundo", carta.get("esp_fundo", "")],
     ]
-    t = Table(dados, colWidths=[W*.18, W*.32, W*.18, W*.32])
-    t.setStyle(TableStyle([("GRID", (0,0),(-1,-1), .25, colors.grey), ("FONTSIZE", (0,0),(-1,-1), 7.5), ("BACKGROUND", (0,0),(-1,-1), colors.whitesmoke)]))
-    story.append(t)
+    t_mat = Table(dados_materiais, colWidths=[W*.18, W*.32, W*.18, W*.32])
+    t_mat.setStyle(TableStyle([("GRID", (0,0),(-1,-1), .25, colors.grey), ("FONTSIZE", (0,0),(-1,-1), 7.5), ("BACKGROUND", (0,0),(-1,-1), colors.whitesmoke)]))
+    story.append(t_mat)
+    story.append(Spacer(1, 3*mm))
+
+    story.append(Paragraph("<b>Dados do lote</b>", S("sec_lote", fontSize=9, textColor=TEXT, fontName="Helvetica-Bold")))
+    dados_lote = [
+        ["Linha", carta.get("linha", ""), "Embalagem", carta.get("embalagem", "")],
+        ["Ordem de produção", carta.get("op", ""), "Quantidade", carta.get("lote_qtd", "")],
+        ["Data", carta.get("data", ""), "Observações", carta.get("obs", "")],
+    ]
+    t_lote = Table(dados_lote, colWidths=[W*.18, W*.32, W*.18, W*.32])
+    t_lote.setStyle(TableStyle([("GRID", (0,0),(-1,-1), .25, colors.grey), ("FONTSIZE", (0,0),(-1,-1), 7.5), ("BACKGROUND", (0,0),(-1,-1), colors.whitesmoke)]))
+    story.append(t_lote)
+    story.append(Spacer(1, 3*mm))
+
+    story.append(Paragraph("<b>Responsável pela inspeção</b>", S("sec_resp", fontSize=9, textColor=TEXT, fontName="Helvetica-Bold")))
+    dados_resp = [["Nome", carta.get("responsavel_nome", ""), "Chapa", carta.get("responsavel_chapa", "")]]
+    t_resp = Table(dados_resp, colWidths=[W*.18, W*.32, W*.18, W*.32])
+    t_resp.setStyle(TableStyle([("GRID", (0,0),(-1,-1), .25, colors.grey), ("FONTSIZE", (0,0),(-1,-1), 7.5), ("BACKGROUND", (0,0),(-1,-1), colors.whitesmoke)]))
+    story.append(t_resp)
     story.append(Spacer(1, 4*mm))
     rows = [["Característica", "Amostras", "N", "Média", "Desvio", "LIE", "LSE", "Cp", "CPU", "CPL", "Cpk", "Status"]]
     for r in results:
@@ -418,32 +456,47 @@ with tab1:
         st.markdown("<div class='orange-help'>Nenhum modelo salvo ainda. Após criar as características, salve o modelo para reutilizar nas próximas inspeções.</div>", unsafe_allow_html=True)
 
     with st.form("form_carta"):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            linha = st.text_input("Linha *", value=st.session_state.carta_dados.get("linha", "GL"))
-            embalagem = st.text_input("Embalagem *", value=st.session_state.carta_dados.get("embalagem", ""))
-            op = st.text_input("Ordem de produção *", value=st.session_state.carta_dados.get("op", ""))
-        with c2:
+        st.markdown("#### Materiais")
+        m1, m2 = st.columns(2)
+        with m1:
+            domo_mat = st.text_input("Usina domo", value=st.session_state.carta_dados.get("domo_mat", ""))
+        with m2:
+            esp_domo = st.text_input("Espessura domo *", value=st.session_state.carta_dados.get("esp_domo", ""))
+
+        m3, m4 = st.columns(2)
+        with m3:
+            corpo_mat = st.text_input("Usina corpo", value=st.session_state.carta_dados.get("corpo_mat", ""))
+        with m4:
             esp_corpo = st.text_input("Espessura corpo *", value=st.session_state.carta_dados.get("esp_corpo", ""))
-            esp_domo = st.text_input("Espessura componente domo *", value=st.session_state.carta_dados.get("esp_domo", ""))
-            esp_fundo = st.text_input("Espessura componente fundo *", value=st.session_state.carta_dados.get("esp_fundo", ""))
-        with c3:
-            lote_qtd = st.number_input("Lote produzido (Qtd) *", min_value=0, step=1, value=int(st.session_state.carta_dados.get("lote_qtd", 0) or 0))
-            data_carta = st.date_input("Data", value=date.today(), format="DD/MM/YYYY")
+
+        m5, m6 = st.columns(2)
+        with m5:
+            fundo_mat = st.text_input("Usina fundo", value=st.session_state.carta_dados.get("fundo_mat", ""))
+        with m6:
+            esp_fundo = st.text_input("Espessura fundo *", value=st.session_state.carta_dados.get("esp_fundo", ""))
+
+        st.markdown("#### Dados do lote")
+        l1, l2 = st.columns(2)
+        with l1:
+            linha = st.text_input("Linha *", value=st.session_state.carta_dados.get("linha", "GL"))
+        with l2:
+            embalagem = st.text_input("Embalagem *", value=st.session_state.carta_dados.get("embalagem", ""))
+
+        l3, l4 = st.columns(2)
+        with l3:
+            op = st.text_input("Ordem de produção *", value=st.session_state.carta_dados.get("op", ""))
+        with l4:
+            lote_qtd = st.number_input("Quantidade / lote produzido *", min_value=0, step=1, value=int(st.session_state.carta_dados.get("lote_qtd", 0) or 0))
+
+        data_carta = st.date_input("Data", value=date.today(), format="DD/MM/YYYY")
+
         st.markdown("#### Responsável pela inspeção")
         r1, r2 = st.columns(2)
         with r1:
             responsavel_nome = st.text_input("Nome do responsável pela inspeção *", value=st.session_state.carta_dados.get("responsavel_nome", ""))
         with r2:
             responsavel_chapa = st.text_input("Chapa do responsável pela inspeção *", value=st.session_state.carta_dados.get("responsavel_chapa", ""))
-        st.markdown("#### Materiais")
-        m1, m2, m3 = st.columns(3)
-        with m1:
-            domo_mat = st.text_input("Material / lote domo", value=st.session_state.carta_dados.get("domo_mat", ""))
-        with m2:
-            corpo_mat = st.text_input("Material / lote corpo", value=st.session_state.carta_dados.get("corpo_mat", ""))
-        with m3:
-            fundo_mat = st.text_input("Material / lote fundo", value=st.session_state.carta_dados.get("fundo_mat", ""))
+
         obs = st.text_area("Observações gerais", value=st.session_state.carta_dados.get("obs", ""))
         submitted = st.form_submit_button("Salvar carta e liberar criação da inspeção", use_container_width=True)
     if submitted:
