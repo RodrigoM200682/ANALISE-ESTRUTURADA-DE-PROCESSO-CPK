@@ -86,6 +86,7 @@ def modelo_from_state(nome):
                 "lie": c["lie"],
                 "lse": c["lse"],
                 "num_amostras": c["num_amostras"],
+                "num_medicoes": c.get("num_medicoes", 3),
             }
             for c in st.session_state.caracteristicas
         ],
@@ -108,13 +109,15 @@ def aplicar_modelo(modelo):
     chars = []
     for idx, c in enumerate(modelo.get("caracteristicas", []), start=1):
         n = int(c.get("num_amostras", 1) or 1)
+        m = int(c.get("num_medicoes", 3) or 3)
         chars.append({
             "id": f"C{idx:03d}_{datetime.now().strftime('%H%M%S')}",
             "descricao": c.get("descricao", ""),
             "lie": float(c.get("lie")),
             "lse": float(c.get("lse")),
             "num_amostras": n,
-            "medicoes": [{"Amostra": i, "Medida 1": None, "Medida 2": None, "Medida 3": None} for i in range(1, n + 1)],
+            "num_medicoes": m,
+            "medicoes": [{"Amostra": i, **{f"Medida {j}": None for j in range(1, m + 1)}} for i in range(1, n + 1)],
         })
     st.session_state.caracteristicas = chars
     st.session_state.selected_id = chars[0]["id"] if chars else None
@@ -129,6 +132,7 @@ def init_state():
         "selected_id": None,
         "carta_dados": {},
         "modelos": load_modelos(),
+        "char_form_nonce": 0,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -188,10 +192,16 @@ def classify_cpk(cpk):
     return "Incapaz"
 
 
+def measurement_keys(char):
+    qtd = int(char.get("num_medicoes", 3) or 3)
+    return [f"Medida {i}" for i in range(1, qtd + 1)]
+
+
 def flatten_measurements(char):
     vals = []
+    keys = measurement_keys(char)
     for row in char.get("medicoes", []):
-        for key in ["Medida 1", "Medida 2", "Medida 3"]:
+        for key in keys:
             v = parse_float(row.get(key))
             if v is not None:
                 vals.append(v)
@@ -200,8 +210,9 @@ def flatten_measurements(char):
 
 def amostras_completas(char):
     completas = 0
+    keys = measurement_keys(char)
     for row in char.get("medicoes", []):
-        if all(parse_float(row.get(k)) is not None for k in ["Medida 1", "Medida 2", "Medida 3"]):
+        if all(parse_float(row.get(k)) is not None for k in keys):
             completas += 1
     return completas
 
@@ -216,7 +227,8 @@ def calc_characteristic(char):
         "lse": char.get("lse"),
         "amostras_previstas": char.get("num_amostras", 0),
         "amostras_completas": amostras_completas(char),
-        "medidas_previstas": char.get("num_amostras", 0) * 3,
+        "medicoes_por_amostra": int(char.get("num_medicoes", 3) or 3),
+        "medidas_previstas": char.get("num_amostras", 0) * int(char.get("num_medicoes", 3) or 3),
         "medidas_realizadas": len(vals),
         "valores": vals,
         "n": s["n"] if s else 0,
@@ -230,6 +242,12 @@ def calc_characteristic(char):
     result["status"] = classify_cpk(result["cpk"])
     return result
 
+
+def characteristic_has_measurements(char):
+    return len(flatten_measurements(char)) > 0
+
+def descricao_normalizada(txt):
+    return re.sub(r"\s+", " ", str(txt or "").strip()).casefold()
 
 def build_insights(results):
     valid = [r for r in results if r.get("cpk") is not None]
@@ -255,7 +273,7 @@ def build_insights(results):
     incompletas = [r for r in results if r["amostras_completas"] < r["amostras_previstas"]]
     if incompletas:
         names = ", ".join(f"{r['descricao']} ({r['amostras_completas']}/{r['amostras_previstas']} amostras)" for r in incompletas)
-        insights.append({"level":"wn", "text":f"Atenção: existem coletas incompletas em {names}. O parecer estatístico é parcial até completar as 3 medidas de todas as amostras previstas."})
+        insights.append({"level":"wn", "text":f"Atenção: existem coletas incompletas em {names}. O parecer estatístico é parcial até completar todas as medições previstas em cada amostra."})
     pct_ok = round(len(ok) / len(valid) * 100)
     level = "ok" if pct_ok >= 80 and not fail else "wn" if pct_ok >= 50 else "fl"
     insights.append({"level":level, "text":f"Resumo geral: {pct_ok}% das características calculadas estão capazes. Total analisado: {len(valid)} característica(s)."})
@@ -400,10 +418,10 @@ def make_pdf(carta, results):
     t_resp.setStyle(TableStyle([("GRID", (0,0),(-1,-1), .25, colors.grey), ("FONTSIZE", (0,0),(-1,-1), 7.5), ("BACKGROUND", (0,0),(-1,-1), colors.whitesmoke)]))
     story.append(t_resp)
     story.append(Spacer(1, 4*mm))
-    rows = [["Característica", "Amostras", "N", "Média", "Desvio", "LIE", "LSE", "Cp", "CPU", "CPL", "Cpk", "Status"]]
+    rows = [["Característica", "Amostras", "Med./am.", "N", "Média", "Desvio", "LIE", "LSE", "Cp", "Cpk", "Status"]]
     for r in results:
-        rows.append([r["descricao"], f"{r['amostras_completas']}/{r['amostras_previstas']}", r["n"], r["media"], r["desvio"], r["lie"], r["lse"], r["cp"], r["cpu"], r["cpl"], r["cpk"], r["status"]])
-    tb = Table(rows, colWidths=[W*.21, W*.075, W*.04, W*.075, W*.075, W*.07, W*.07, W*.055, W*.055, W*.055, W*.06, W*.10], repeatRows=1)
+        rows.append([r["descricao"], f"{r['amostras_completas']}/{r['amostras_previstas']}", r.get("medicoes_por_amostra", ""), r["n"], r["media"], r["desvio"], r["lie"], r["lse"], r["cp"], r["cpk"], r["status"]])
+    tb = Table(rows, colWidths=[W*.23, W*.075, W*.065, W*.04, W*.075, W*.075, W*.07, W*.07, W*.055, W*.06, W*.095], repeatRows=1)
     tb.setStyle(TableStyle([("GRID", (0,0),(-1,-1), .25, colors.grey), ("FONTSIZE", (0,0),(-1,-1), 6.2), ("BACKGROUND", (0,0),(-1,0), colors.lightgrey)]))
     story.append(tb)
     story.append(Spacer(1, 5*mm))
@@ -428,7 +446,7 @@ def make_pdf(carta, results):
 # Interface
 # ─────────────────────────────────────────────────────────────────────────────
 st.title("📊 Carta de Inspeção CPK")
-st.caption("Fluxo: modelo salvo → carta de dados → características → medições com 3 medidas por amostra → análise estatística e parecer automático.")
+st.caption("Fluxo: modelo salvo → carta de dados → características sem duplicidade → medições por amostra → análise somente das cartas preenchidas → parecer automático.")
 
 tab1, tab2, tab3, tab4 = st.tabs(["1. Carta de dados", "2. Criar inspeção", "3. Registrar medições", "4. Análise estatística"])
 
@@ -523,37 +541,47 @@ with tab2:
         st.warning("Primeiro salve a Carta de dados na aba 1.")
     else:
         st.markdown("<div class='orange-help'>O botão de criação fica em laranja para indicar inclusão/edição. Após a característica estar criada e disponível para uso, os botões de abertura e exportação aparecem em verde.</div>", unsafe_allow_html=True)
-        with st.form("form_caracteristica"):
-            descricao = st.text_input("Descrição da característica *", placeholder="Ex.: Diâmetro interno, pestana, altura, profundidade de expansão")
-            c1, c2, c3 = st.columns(3)
+        nonce = st.session_state.char_form_nonce
+        with st.form(f"form_caracteristica_{nonce}"):
+            descricao = st.text_input("Descrição da característica *", placeholder="Ex.: Diâmetro interno, pestana, altura, profundidade de expansão", key=f"desc_char_{nonce}")
+            c1, c2 = st.columns(2)
             with c1:
-                lie = st.text_input("Limite mínimo / LIE *", placeholder="Ex.: 52,10")
+                lie = st.text_input("Limite mínimo / LIE *", placeholder="Ex.: 52,10", key=f"lie_char_{nonce}")
             with c2:
-                lse = st.text_input("Limite máximo / LSE *", placeholder="Ex.: 52,30")
+                lse = st.text_input("Limite máximo / LSE *", placeholder="Ex.: 52,30", key=f"lse_char_{nonce}")
+            c3, c4 = st.columns(2)
             with c3:
-                num_amostras = st.number_input("Número de amostras que serão coletadas *", min_value=1, max_value=200, step=1, value=10)
+                num_amostras = st.number_input("Número de amostras que serão coletadas *", min_value=1, max_value=200, step=1, value=10, key=f"n_amostras_char_{nonce}")
+            with c4:
+                num_medicoes = st.number_input("Número de medições por amostra *", min_value=1, max_value=10, step=1, value=3, key=f"n_medicoes_char_{nonce}")
             submitted_char = st.form_submit_button("Salvar característica", use_container_width=True)
         if submitted_char:
             lie_v = parse_float(lie)
             lse_v = parse_float(lse)
+            desc_norm = descricao_normalizada(descricao)
+            duplicada = any(descricao_normalizada(c.get("descricao")) == desc_norm for c in st.session_state.caracteristicas)
             if not descricao.strip() or lie_v is None or lse_v is None or lie_v >= lse_v:
                 st.error("Informe descrição, limite mínimo e limite máximo válidos. O limite mínimo deve ser menor que o limite máximo.")
+            elif duplicada:
+                st.error(f"A característica '{descricao.strip()}' já possui uma carta de inspeção criada. Não é permitido salvar duas cartas com a mesma descrição.")
             else:
                 new_id = f"C{len(st.session_state.caracteristicas)+1:03d}_{datetime.now().strftime('%H%M%S')}"
-                medicoes = [{"Amostra": i, "Medida 1": None, "Medida 2": None, "Medida 3": None} for i in range(1, int(num_amostras)+1)]
+                medicoes = [{"Amostra": i, **{f"Medida {j}": None for j in range(1, int(num_medicoes) + 1)}} for i in range(1, int(num_amostras)+1)]
                 st.session_state.caracteristicas.append({
                     "id": new_id, "descricao": descricao.strip(), "lie": lie_v, "lse": lse_v,
-                    "num_amostras": int(num_amostras), "medicoes": medicoes,
+                    "num_amostras": int(num_amostras), "num_medicoes": int(num_medicoes), "medicoes": medicoes,
                 })
                 st.session_state.selected_id = new_id
-                st.success("Característica criada e habilitada para utilização.")
+                st.session_state.char_form_nonce += 1
+                st.success("Característica criada e habilitada para utilização. Os campos foram limpos para nova inclusão.")
+                st.rerun()
 
         if st.session_state.caracteristicas:
             st.markdown("#### Características abertas")
             for char in st.session_state.caracteristicas:
                 result = calc_characteristic(char)
                 cols = st.columns([4, 1, 1, 1])
-                cols[0].markdown(f"**{char['descricao']}**  \nLIE: {char['lie']} | LSE: {char['lse']} | Amostras: {char['num_amostras']} | Medições: {result['medidas_realizadas']}/{result['medidas_previstas']}")
+                cols[0].markdown(f"**{char['descricao']}**  \nLIE: {char['lie']} | LSE: {char['lse']} | Amostras: {char['num_amostras']} | Medições/amostra: {char.get('num_medicoes', 3)} | Medições: {result['medidas_realizadas']}/{result['medidas_previstas']}")
                 cols[1].metric("Cpk", "—" if result["cpk"] is None else result["cpk"])
                 cols[2].markdown(f"**Status:** {result['status']}")
                 if cols[3].button("Abrir", key=f"open_{char['id']}", type="primary"):
@@ -580,30 +608,33 @@ with tab3:
         selected_label = st.selectbox("Selecione a característica", list(options.keys()), index=list(options.keys()).index(current_key))
         st.session_state.selected_id = options[selected_label]
         char = next(c for c in st.session_state.caracteristicas if c["id"] == st.session_state.selected_id)
-        st.info(f"Cada amostra deve conter obrigatoriamente 3 medidas. Característica: {char['descricao']} | LIE {char['lie']} | LSE {char['lse']}")
+        keys_medicao = measurement_keys(char)
+        st.info(f"Cada amostra deve conter obrigatoriamente {char.get('num_medicoes', 3)} medição(ões). Característica: {char['descricao']} | LIE {char['lie']} | LSE {char['lse']}")
         df_med = pd.DataFrame(char["medicoes"])
+        expected_cols = ["Amostra"] + keys_medicao
+        for col in expected_cols:
+            if col not in df_med.columns:
+                df_med[col] = None
+        df_med = df_med[expected_cols]
+        column_config = {"Amostra": st.column_config.NumberColumn("Amostra", disabled=True)}
+        column_config.update({k: st.column_config.NumberColumn(k, format="%.4f") for k in keys_medicao})
         edited_med = st.data_editor(
             df_med,
             use_container_width=True,
             hide_index=True,
             num_rows="fixed",
-            column_config={
-                "Amostra": st.column_config.NumberColumn("Amostra", disabled=True),
-                "Medida 1": st.column_config.NumberColumn("Medida 1", format="%.4f"),
-                "Medida 2": st.column_config.NumberColumn("Medida 2", format="%.4f"),
-                "Medida 3": st.column_config.NumberColumn("Medida 3", format="%.4f"),
-            },
+            column_config=column_config,
             key=f"editor_{char['id']}",
         )
         if st.button("Salvar medições desta característica", use_container_width=True, type="primary"):
             registros = edited_med.to_dict("records")
             incompletas = []
             for row in registros:
-                vals = [parse_float(row.get(k)) for k in ["Medida 1", "Medida 2", "Medida 3"]]
+                vals = [parse_float(row.get(k)) for k in keys_medicao]
                 if any(v is not None for v in vals) and not all(v is not None for v in vals):
                     incompletas.append(int(row.get("Amostra", 0)))
             if incompletas:
-                st.error(f"As amostras {incompletas} estão parcialmente preenchidas. Cada amostra registrada deve ter as 3 medidas.")
+                st.error(f"As amostras {incompletas} estão parcialmente preenchidas. Cada amostra registrada deve ter {len(keys_medicao)} medição(ões).")
             else:
                 char["medicoes"] = registros
                 st.success("Medições salvas. A análise estatística já pode ser consultada na aba 4.")
@@ -613,7 +644,12 @@ with tab4:
     if not st.session_state.caracteristicas:
         st.warning("Não há características criadas para análise.")
     else:
-        results = [calc_characteristic(c) for c in st.session_state.caracteristicas]
+        todas_results = [calc_characteristic(c) for c in st.session_state.caracteristicas]
+        chars_preenchidas = [c for c in st.session_state.caracteristicas if characteristic_has_measurements(c)]
+        results = [calc_characteristic(c) for c in chars_preenchidas]
+        if not results:
+            st.warning("Nenhuma carta preenchida foi localizada. A análise estatística considera somente características com medições registradas.")
+            st.stop()
         valid = [r for r in results if r.get("cpk") is not None]
         ok_n = len([r for r in valid if r["cpk"] >= 1.33])
         wn_n = len([r for r in valid if 1 <= r["cpk"] < 1.33])
@@ -624,11 +660,14 @@ with tab4:
         c2.metric("Capazes ≥ 1,33", ok_n)
         c3.metric("Marginais", wn_n)
         c4.metric("Incapazes", fl_n)
-        c5.metric("Características", len(results))
+        c5.metric("Cartas preenchidas", len(results))
+        cartas_branco = len(todas_results) - len(results)
+        if cartas_branco > 0:
+            st.info(f"{cartas_branco} carta(s) em branco foram desconsideradas da análise estatística.")
 
         result_df = pd.DataFrame([{
             "Característica": r["descricao"], "Amostras completas": f"{r['amostras_completas']}/{r['amostras_previstas']}",
-            "Medições realizadas": r["medidas_realizadas"], "N": r["n"], "Média": r["media"],
+            "Medições/amostra": r.get("medicoes_por_amostra"), "Medições realizadas": r["medidas_realizadas"], "N": r["n"], "Média": r["media"],
             "Desvio": r["desvio"], "LIE": r["lie"], "LSE": r["lse"], "Cp": r["cp"],
             "CPU": r["cpu"], "CPL": r["cpl"], "Cpk": r["cpk"], "Status": r["status"],
         } for r in results])
@@ -651,7 +690,7 @@ with tab4:
             with pd.ExcelWriter(xlsx, engine="openpyxl") as writer:
                 pd.DataFrame([st.session_state.carta_dados]).to_excel(writer, sheet_name="CARTA", index=False)
                 result_df.to_excel(writer, sheet_name="RESULTADOS", index=False)
-                for c in st.session_state.caracteristicas:
+                for c in chars_preenchidas:
                     safe = re.sub(r"[^A-Za-z0-9_]+", "_", c["descricao"][:20]) or c["id"]
                     pd.DataFrame(c["medicoes"]).to_excel(writer, sheet_name=safe[:31], index=False)
             st.download_button("Baixar Excel da carta", xlsx.getvalue(), file_name=f"carta_cpk_{datetime.now().strftime('%d_%m_%Y_%H%M')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
