@@ -99,3 +99,36 @@ git push -u origin main
 - **Backend:** Python / Flask / ReportLab (PDF)
 - **Frontend:** HTML + CSS + JavaScript vanilla / Chart.js
 - **Deploy:** Gunicorn + Railway ou Render
+
+---
+
+## ⚠️ Plataformas suportadas
+
+Este app é **Flask** (não Streamlit). Use uma destas plataformas:
+
+| Plataforma | Grátis | Recomendado |
+|---|---|---|
+| **Railway** | ✅ $5 crédito/mês | ⭐ Melhor opção |
+| **Render** | ✅ Tier gratuito | ✅ Boa opção |
+| **Fly.io** | ✅ Tier gratuito | ✅ Boa opção |
+| Streamlit Cloud | ❌ Não suporta Flask | ✗ Não use |
+| Heroku | ❌ Apenas pago | ✗ Não recomendado |
+
+### Deploy correto no Railway
+
+1. Vá em [railway.app](https://railway.app)
+2. Login com GitHub
+3. **New Project → Deploy from GitHub repo**
+4. Selecione `analise-estruturada-de-processo-cpk`
+5. Railway lê o `Procfile` automaticamente: `gunicorn app:app`
+6. Aguarde ~2 min → URL pública gerada
+
+### Deploy correto no Render
+
+1. Vá em [render.com](https://render.com)
+2. **New → Web Service → Connect GitHub**
+3. Selecione o repositório
+4. Configure:
+   - **Build Command:** `pip install -r requirements.txt`
+   - **Start Command:** `gunicorn app:app`
+5. Deploy → URL pública em ~3 min
